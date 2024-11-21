@@ -14,7 +14,7 @@ from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.core.query_engine import NLSQLTableQueryEngine
 from sqlalchemy import create_engine, text
 import os
-import re
+
 
 global df
 
@@ -98,6 +98,7 @@ def store_df_in_db(updated_df=None):
 
 def ask_db(query):
     try:
+        global engine
 
         engine = create_engine('sqlite:///data22.db')
 
@@ -115,7 +116,7 @@ def ask_db(query):
         print("Answer :", response)
         response_meta = {response.metadata['sql_query']}
         print("SQL QUERY USED: ", response_meta)
-
+        engine.dispose()
         return response
 
     except Exception as e:
@@ -125,7 +126,6 @@ def ask_db(query):
 def process_file(file):
     global df
 
-    # Read the file
     if file.name.endswith('.csv'):
         df = pd.read_csv(file.name)
     elif file.name.endswith('.xlsx'):
@@ -133,29 +133,13 @@ def process_file(file):
     else:
         return "Unsupported file format. Please upload a CSV or Excel file."
 
-    # 1. Remove any completely empty columns (those with no data and no header)
-    df.dropna(axis=1, how='all', inplace=True)
-
-    # 2. Preprocess column names (strip whitespace, replace special characters)
-    df.columns = [
-        re.sub(r'[\t/\\*?"<>|&%$#@!^=+]', '_', col.strip()) if isinstance(col, str) else "Unknown"
-        for col in df.columns
-    ]
-
-    # 3. Handle missing column names (label them as "Unknown" if there's data but no header)
-    for i, col in enumerate(df.columns):
-        if col == "" or col is None:
-            df.columns.values[i] = "Unknown"
-
-    # Return updated dataframe column information for the UI
     column_info = pd.DataFrame({
         'Existing Column Name': df.columns,
         "Edit Column Name": df.columns,
         'ADD Description': ['' for _ in df.columns]
     })
-
     gr.update(interactive=True)
-    return column_info
+    return gr.update(value=column_info, visible=True), gr.update(visible=True)  # Show the button here
 
 @singleton
 class PrivateGptUi:
@@ -178,15 +162,9 @@ class PrivateGptUi:
 
         # When the mode is "Update Column Names", close the DB connection and reset the session
         if mode == "Update Column Names":
-            if db_connection:
-                db_connection.close()
-                db_connection = None
-                print("Database connection closed.")
-
-            df = None
-            query_engine = None
-            engine = None
-            print("Session variables reset.")
+            if engine:
+                engine.dispose()
+                print("Session variables reset.")
 
             return [
                 gr.update(visible=True),
@@ -216,7 +194,7 @@ class PrivateGptUi:
         print("Updated DataFrame:")
         print(df)
 
-        return f"DataFrame updated successfully!"
+        return "DF UPDATE SUCCESS"
 
     def _build_ui_blocks(self) -> gr.Blocks:
         with gr.Blocks(
@@ -254,7 +232,7 @@ class PrivateGptUi:
                     cursor: pointer;
                     width: auto; /* Make the button only as wide as its content */
                     margin-left: auto; /* Center the button horizontally within its container */
-                    display: block; /* Ensures it behaves as a block-level element */
+
                 }
                 .save-btn:hover {
                     background-color: #218838; /* Darker green on hover */
@@ -291,13 +269,12 @@ class PrivateGptUi:
 
                 with gr.Column(visible=True) as csv_mode:
                     file_input = gr.File(label="Upload CSV/Excel File")
-                    save_button = gr.Button("Save Updated Columns", elem_classes=["save-btn"])
+                    save_button = gr.Button("Save Updated Columns", visible= False,elem_classes=["save-btn"], )
 
                     df_output = gr.Dataframe(type="pandas",
-                                             interactive=True,column_widths=[200, 200,300])
+                                             interactive=True,column_widths=[200, 200,300], visible=False)
 
-
-                file_input.upload(process_file, inputs=file_input, outputs=df_output)
+                file_input.upload(process_file, inputs=file_input, outputs=[df_output, save_button])
 
                 save_button.click(self._save_column_updates, inputs=df_output)
 
