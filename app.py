@@ -19,7 +19,7 @@ import os
 global df
 
 UI_TAB_TITLE = "KKL PRIVATE GPT"
-AVATAR_BOT = Path(r"static\KKL_Logo.svg")
+AVATAR_BOT = Path(r"static\logo.jpg")
 AVATAR_BOT2 = Path(r"static\img.ico")
 MODES = ["Update Column Names", "Start Chat"]
 
@@ -52,7 +52,7 @@ def initialize_llm():
     tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-Instruct-v0.3")
 
     llm = LlamaCPP(
-        model_path="models/Mistral-7B-Instruct-v0.3.Q8_0.gguf",
+        model_path="models/mistral-7b-instruct-v0.3-q8_0.gguf",
         temperature=0.1,
         max_new_tokens=1024,
         context_window=16348,  # max 32k
