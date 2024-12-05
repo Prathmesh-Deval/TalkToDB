@@ -1,9 +1,9 @@
 import base64
 import sqlite3
 from pathlib import Path
+from random import choices
 from typing import Any
 import gradio as gr
-from fastapi import FastAPI
 from gradio.themes.utils.colors import slate
 from injector import inject, singleton
 import pandas as pd
@@ -13,8 +13,8 @@ from llama_index.llms.llama_cpp import LlamaCPP
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.core.query_engine import NLSQLTableQueryEngine
 from sqlalchemy import create_engine, text, inspect
-import os
 import json
+
 
 global llm
 global embed
@@ -24,7 +24,7 @@ import os
 UI_TAB_TITLE = "KKL PRIVATE GPT"
 AVATAR_BOT = Path(r"static\logo.svg")
 AVATAR_BOT2 = Path(r"static\img.ico")
-MODES = ["Update Column Names", "Ingested Databases", "Start Chat"]
+MODES = ["Upload File", "Ingested Databases", "Start Chat"]
 
 
 def messages_to_prompt1(messages):
@@ -63,11 +63,9 @@ def messages_to_prompt_description(messages):
         elif message['role'] == 'assistant':
             prompt += f"<|assistant|>\n{message['content']}</s>\n"
 
-    # Ensure we start with a system prompt if not already there
     if not prompt.startswith("<|system|>\n"):
         prompt = "<|system|>\n</s>\n" + prompt
 
-    # Add final assistant prompt
     prompt = prompt + "<|assistant|>\n"
 
     return prompt
@@ -128,10 +126,8 @@ def initialize_llm2():
     return llm2, embed2
 
 
-# Example usage in generate_table_description
 def generate_table_description(df_output):
     columns = df_output['Edit Column Name'].tolist()
-    # Create a prompt for the model
     prompt = f"""
     You are an AI assistant with expertise in nuclear engineering, nuclear science, and complex scientific terminologies. 
     I will provide you with a list of column names that pertain to a nuclear company dataset. 
@@ -145,18 +141,15 @@ def generate_table_description(df_output):
     Please provide a short description for the dataset's columns.
     """
 
-    # Now, create the message list as a list of dictionaries
     messages = [
         {"role": "system", "content": "You are an AI assistant with nuclear industry expertise."},
         {"role": "user", "content": prompt}
     ]
 
-    # Convert messages to formatted prompt
     formatted_prompt = messages_to_prompt_description(messages)
 
     llm2, embed2 = initialize_llm2()
 
-    # Get the response from the model
     response = llm2.complete(formatted_prompt)
 
     print("\n\n####RES:", response)
@@ -191,8 +184,6 @@ def store_df_in_db(updated_df=None, filename="unknown", overwrite=False):
         print("UPDATING @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
         updated_df.to_sql(table_name, src, if_exists='replace' if overwrite else 'fail', index=False)
 
-        # llm, embed = initialize_llm()
-
         tables = existing_tables if table_name in existing_tables else existing_tables + [table_name]
 
         print(f"Table {table_name} stored successfully.")
@@ -204,27 +195,53 @@ def store_df_in_db(updated_df=None, filename="unknown", overwrite=False):
         print(f"Error while storing table {table_name}: {e}")
         return f"Error: {str(e)}"
     finally:
-        overwrite = False
         src.close()
 
+
+# def ask_db(query, selected_table):
+#     try:
+#         print("ASK DB")
+#         global tables
+#
+#         selected_tables = list()
+#         selected_tables.append(selected_table)
+#
+#         engine = create_engine('sqlite:///DATABASE.db')
+#
+#         sql_database = SQLDatabase(engine, include_tables=selected_tables)
+#
+#         query_engine = NLSQLTableQueryEngine(
+#             sql_database=sql_database,
+#             tables=selected_tables,
+#             llm=llm,
+#             embed_model=embed
+#         )
+#         print("Sending question to model")
+#         response = query_engine.query(query)
+#         print("Answer :", response)
+#         response_meta = {response.metadata['sql_query']}
+#         print("SQL QUERY USED: ", response_meta)
+#         engine.dispose()
+#         return response
+#
+#     except Exception as e:
+#         return f"Error during query execution: {e}"
+
+from llama_index.core.indices.struct_store.sql_query import (
+    SQLTableRetrieverQueryEngine,
+)
+from llama_index.core.objects import (
+    SQLTableNodeMapping,
+    ObjectIndex,
+    SQLTableSchema,
+)
+from llama_index.core import VectorStoreIndex
 
 def ask_db(query, selected_table):
     try:
         print("ASK DB")
-        # global engine
         global tables
 
-
-        # src = sqlite3.connect("DATABASE.db")
-        #
-        # query2= "SELECT name FROM sqlite_master WHERE type='table';"
-        #
-        # cursor = src.cursor()
-        # cursor.execute(query2)
-        # tables = [row[0] for row in cursor.fetchall()]
-        # print("Table_LIST", tables)
-        # cursor.close()
-        # src.close()
         selected_tables = list()
         selected_tables.append(selected_table)
 
@@ -232,12 +249,39 @@ def ask_db(query, selected_table):
 
         sql_database = SQLDatabase(engine, include_tables=selected_tables)
 
-        query_engine = NLSQLTableQueryEngine(
-            sql_database=sql_database,
-            tables=selected_tables,
-            llm=llm,
-            embed_model=embed
+
+        ############################################
+        key = selected_table
+        with open("table_description.json", 'r', encoding='utf-8') as file:
+            data = json.load(file)
+
+        table_description = str(data.get(key, f"Key '{key}' not found in the JSON file."))
+        print("\n PASSING TABLE DESCRIPTION AS -- >" , table_description)
+
+        table_node_mapping = SQLTableNodeMapping(sql_database)
+
+        table_schema_objs = [
+            (SQLTableSchema(table_name=selected_table, ntext_str=table_description))
+        ]
+
+        obj_index = ObjectIndex.from_objects(
+            table_schema_objs,
+            table_node_mapping,
+            VectorStoreIndex,
         )
+
+        query_engine = SQLTableRetrieverQueryEngine(
+            sql_database, obj_index.as_retriever(similarity_top_k=1)
+        )
+
+        #############################################
+        #
+        # query_engine = NLSQLTableQueryEngine(
+        #     sql_database=sql_database,
+        #     tables=selected_tables,
+        #     llm=llm,
+        #     embed_model=embed
+        # )
         print("Sending question to model")
         response = query_engine.query(query)
         print("Answer :", response)
@@ -249,21 +293,70 @@ def ask_db(query, selected_table):
     except Exception as e:
         return f"Error during query execution: {e}"
 
+# def process_file(file):
+#     global df
+#     global file_name
+#     print("ORIGINAL FILENAME", file.name)
+#
+#     file_name = file.name.split("\\")[-1].split(".")[0]
+#     print("\nFileName-> ", file_name)
+#
+#     if file.name.endswith('.csv'):
+#         df = pd.read_csv(file.name)
+#     elif file.name.endswith('.xlsx'):
+#         df = pd.read_excel(file.name)
+#     else:
+#         return "Unsupported file format. Please upload a CSV or Excel file."
+#
+#     column_info = pd.DataFrame({
+#         'Existing Column Name': df.columns,
+#         "Edit Column Name": df.columns,
+#         'ADD Description': ['' for _ in df.columns]
+#     })
+#     gr.update(interactive=True)
+#     return gr.update(value=file_name, visible=True), gr.update(value=column_info, visible=True), gr.update(
+#         visible=True), gr.update(visible=True), gr.update(visible=True) , gr.update(visible=True)
 
-def process_file(file):
+def process_file(file,selected_sheet):
+    print("\n^^^^^^^^^^^FILE", file,selected_sheet)
     global df
     global file_name
     print("ORIGINAL FILENAME", file.name)
 
     file_name = file.name.split("\\")[-1].split(".")[0]
     print("\nFileName-> ", file_name)
+    if len(selected_sheet) == 0:
+        print("inside if")
+        if file.name.endswith('.csv'):
+            df = pd.read_csv(file.name)
+        elif file.name.endswith('.xlsx'):
+            excel_file = pd.ExcelFile(file.name)
 
-    if file.name.endswith('.csv'):
-        df = pd.read_csv(file.name)
-    elif file.name.endswith('.xlsx'):
-        df = pd.read_excel(file.name)
+            if len(excel_file.sheet_names) > 1:
+                # Multiple sheets, show a dropdown for sheet selection
+                sheet_names = excel_file.sheet_names
+                print("\nreturning", sheet_names)
+
+                return (gr.update(visible=False),
+                        gr.update( visible=False),
+                        gr.update(visible=False),
+                        gr.update(visible=False),
+                        gr.update(visible=False),
+                        gr.update(visible=False),
+                        gr.update(choices=sheet_names, value=sheet_names, visible=True),
+                        gr.update(visible=True),
+                        gr.update(visible=True))
+
+            print("\nSingle sheet reading df")
+            df = pd.read_excel(file.name)
+
+
+        else:
+            return "Unsupported file format. Please upload a CSV or Excel file."
+
     else:
-        return "Unsupported file format. Please upload a CSV or Excel file."
+        print("inside else", selected_sheet)
+        df = pd.read_excel(file.name, sheet_name=selected_sheet)
 
     column_info = pd.DataFrame({
         'Existing Column Name': df.columns,
@@ -271,8 +364,15 @@ def process_file(file):
         'ADD Description': ['' for _ in df.columns]
     })
     gr.update(interactive=True)
-    return gr.update(value=file_name, visible=True), gr.update(value=column_info, visible=True), gr.update(
-        visible=True), gr.update(visible=True), gr.update(visible=True) , gr.update(visible=True)
+    return (gr.update(value=file_name, visible=True),
+            gr.update(value=column_info, visible=True),
+            gr.update(visible=True),
+            gr.update(visible=True),
+            gr.update(visible=True) ,
+            gr.update(visible=True),
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(visible=False))
 
 
 def get_database_tables():
@@ -292,30 +392,40 @@ def view_table_columns(table_name):
 
     if os.path.exists("DATABASE.db"):
         src = sqlite3.connect("DATABASE.db")
-        query = f"PRAGMA table_info({table_name});"
+        query = f'PRAGMA table_info("{table_name}");'
         df = pd.read_sql(query, src)
 
         if not df.empty:
             columns = df['name'].tolist()
 
-            stats_query = f"SELECT * FROM {table_name}"
+            stats_query = f'SELECT * FROM "{table_name}"'
             data = pd.read_sql(stats_query, src)
 
             stats = {}
 
             for column in columns:
-                column_data = data[column]
+                column_data = data.get(column)
 
-                numeric_column = pd.to_numeric(column_data, errors='coerce')
+                if column_data is not None:
+                    numeric_column = pd.to_numeric(column_data, errors='coerce')
 
-                stats[column] = {
-                    "Column Name": column,
-                    'Data Type': column_data.dtype,
-                    'Null Values': column_data.isnull().sum(),
-                    'Unique Count': column_data.nunique(),
-                    'Max Value': numeric_column.max() if numeric_column.notnull().any() else None,
-                    'Min Value': numeric_column.min() if numeric_column.notnull().any() else None
-                }
+                    stats[column] = {
+                        "Column Name": column,
+                        'Data Type': column_data.dtype,
+                        'Null Values': column_data.isnull().sum(),
+                        'Unique Count': column_data.nunique(),
+                        'Max Value': numeric_column.max() if numeric_column.notnull().any() else None,
+                        'Min Value': numeric_column.min() if numeric_column.notnull().any() else None
+                    }
+                else:
+                    stats[column] = {
+                        "Column Name": column,
+                        'Data Type': None,
+                        'Null Values': None,
+                        'Unique Count': None,
+                        'Max Value': None,
+                        'Min Value': None
+                    }
             src.close()
             stats_df = pd.DataFrame(stats).T
 
@@ -358,6 +468,7 @@ class PrivateGptUi:
         self.updated_columns = []
         self.updated_descriptions = []
         self.is_file_loaded = False
+        self.selected_sheet = ""
 
     def _chat(self, message: str, history: list[list[str]], mode: str, selected_table: str, *_: Any) -> Any:
         print(f"Selected Table: {selected_table}")
@@ -365,8 +476,8 @@ class PrivateGptUi:
         response = ask_db(message, selected_table)
         return response.text if hasattr(response, 'text') else str(response)
 
+
     def _set_current_mode(self, mode: str) -> Any:
-        global db_connection, query_engine, df
 
         if mode == "Start Chat":
             if os.path.exists("DATABASE.db"):
@@ -406,7 +517,7 @@ class PrivateGptUi:
 
         self._system_prompt = f"System prompt updated for mode: {mode}"
 
-        if mode == "Update Column Names":
+        if mode == "Upload File":
             self._system_prompt = f"Preprocess CSV and Ingest into Database."
 
 
@@ -422,7 +533,6 @@ class PrivateGptUi:
 
             ]
         elif mode == "Start Chat":
-            # store_df_in_db(updated_df=df)
             updated_tables = get_database_tables()
             default_table = updated_tables[0] if updated_tables else "No Tables Available"
             return [
@@ -472,224 +582,15 @@ class PrivateGptUi:
 
         return gr.update(value="Column Names Updated Successfully!", visible=True)
 
+
     def _build_ui_blocks(self) -> gr.Blocks:
         with gr.Blocks(
                 title=UI_TAB_TITLE,
                 theme=gr.themes.Soft(primary_hue=slate),
-                css=""" 
-                body, .gradio-container {
-                        font-family: Arial, Helvetica, sans-serif;
-                }
-                .logo { 
-                    display: flex;
-                    justify-content: center;
-                    align-items: center;
-                    height: 100px;
-                    background-color: #00538C;
+                css="static/style.css"
 
-                }
-                .logo img { 
-                    height: 70%;
-                    background-color: rgb(0, 83, 140); 
-                    padding-right: 30px;
-
-                }
-                .header-ico {
-                    height: 20px;
-                    background-color: antiquewhite;
-                    border-radius: 2px;
-                    margin-right: 20px;
-                }
-                /* Custom CSS for the Save Button */
-                .save-btn {
-                    background-color: #28a745; /* Green */
-                    color: white;
-                    border-radius: 5px;
-                    padding: 6px 12px; /* Small button */
-                    font-size: 12px;
-                    cursor: pointer;
-                    width: auto; /* Make the button only as wide as its content */
-                    margin-left: auto; /* Center the button horizontally within its container */
-
-                }
-                .save-btn:hover {
-                    background-color: #218838; /* Darker green on hover */
-                }
-                .success-msg {
-                    color: green;          /* Font color set to green */
-                    font-size: 12px;       /* Font size set to 12px */
-                    width: 20%;            /* Control the width of the textbox */
-                    height: 50px;
-                    margin-left: 80%;      /* Align the textbox towards the right (adjust as needed) */
-                    text-align: center;    /* Center the text inside the box */
-
-                }
-                .ingest-btn {
-                    background-color: rgb(0, 83, 140);/* blue */
-                    color: white;
-                    border-radius: 5px;
-                    # padding: 6px 12px; /* Small button */
-                    font-size: 12px;
-                    cursor: pointer;
-                    # width: auto; /* Make the button only as wide as its content */
-                    margin-left: auto; /* Center the button horizontally within its container */
-
-                }
-
-                /* Style for the confirmation message */
-                .confirmation-message textarea {
-                    font-weight: bold;
-                    border: none; /* Remove border */
-                    background: transparent; /* Transparent background */
-                    text-align: center; /* Center align */
-                    width: 100%; /* Full width for better alignment */
-                }
-
-                .confirm-btn, .cancel-btn {
-                    background-color: #28a745; /* Green */
-                    color: white;
-                    border-radius: 5px;
-                    padding: 6px 12px; /* Reduced padding for smaller buttons */
-                    font-size: 12px; /* Smaller font size */
-                    cursor: pointer;
-                    width: auto;  /* Auto width based on content */
-                    margin-right: 10px; /* Small space between buttons */
-                    display: inline-block; /* Display buttons next to each other */
-                }
-
-                .confirm-btn:hover {
-                    background-color: #218838; /* Darker green on hover */
-                }
-
-                .cancel-btn {
-                    background-color: #dc3545; /* Red */
-                    color: white;
-                    border-radius: 5px;
-                    padding: 6px 12px; /* Reduced padding for smaller buttons */
-                    font-size: 12px; /* Smaller font size */
-                    cursor: pointer;
-                    width: auto;  /* Auto width based on content */
-                }
-
-                .cancel-btn:hover {
-                    background-color: #c82333; /* Darker red on hover */
-                }
-
-                /* Container for the buttons (to ensure they're in the same row) */
-                .button-container {
-                    display: flex;
-                    justify-content: center; /* Center the buttons */
-                    gap: 10px; /* Space between buttons */
-                }
-                
-                .db-table-row {
-                    display: flex;
-                    justify-content: center; /* Center the content horizontally */
-                    align-items: center;    /* Center the content vertically */
-                    gap: 10px;              /* Spacing between items */
-                    margin: 5px 0;          /* Spacing between rows */
-                    height: 35px;           /* Reduce the row height */
-                }
-                
-                /* Styling for the text box */
-                .db-text-box {
-                    width: 150px;           /* Adjust width to save space */
-                    text-align: center;     /* Center-align text */
-                }
-                
-                .db-text-box textarea {
-                    height: 100px;           /* Adjust width to save space */
-                    text-align: center;     /* Center-align text */
-                }
-                
-                /* Styling for buttons */
-                .db-confirm-btn {
-                    background-color: #b8e994; /* Pastel green for "Update Columns" */
-                    color: black;
-                    border: none;
-                    padding: 5px 10px;
-                    font-size: 12px;
-                    border-radius: 5px;
-                    height: 30px; /* Reduce button height */
-                    cursor: pointer;
-                }
-                
-                .db-confirm-btn:hover {
-                    background-color: #a5d6a7; /* Slightly darker green on hover */
-                }
-                
-                .db-cancel-btn {
-                    background-color: #f8a5a5; /* Pastel red for "Delete Table" */
-                    color: black;
-                    border: none;
-                    padding: 5px 10px;
-                    font-size: 12px;
-                    border-radius: 5px;
-                    height: 30px; /* Reduce button height */
-                    cursor: pointer;
-                }
-                
-                .db-cancel-btn:hover {
-                    background-color: #f08686; /* Slightly darker red on hover */
-                }
-                .radio-buttons {
-                    # display: flex;
-                    # align-items: center;
-                    # justify-content: space-evenly;
-                }
-                
-                .radio-buttons label {
-                    # padding: 10px 20px;
-                    # font-size: 16px;
-                    cursor: pointer;
-                    # transition: all 0.3s ease;
-                    # position: relative;
-                    # border-radius: 5px 5px 0 0;  /* Rounded corners on the top */
-                }
-
-                
-                .radio-buttons label:hover
-                    background-color: rgba(0, 83, 140, 0.6);  /* Light hover effect */
-                }
-                
-                # /* Underline effect */
-                # .radio-buttons input[type="radio"]:checked + label::after {
-                #     content: '';
-                #     position: absolute;
-                #     bottom: 0;
-                #     left: 0;
-                #     width: 100%;
-                #     height: 2px;
-                #     background-color: white; /* Underline color */
-                #     border-radius: 1px;
-                # }
-                
-                .kkllogo img{
-                    background-color: rgb(0, 83, 140); ;
-                }
-                
-                .ingested_message {
-                    color: rgb(0,83,140) !important;
-
-                }
-                
-                .ingested_message input {
-                    font-weight: bold;
-                    color: rgb(0,83,140) !important;
-                    background-color: #e9ecef; /* Light gray background */
-                    border: 1px solid #adb5bd; /* Subtle gray border */
-                    border-radius: 5px; /* Rounded corners for elegance */
-                    padding: 10px; /* Add spacing for better readability */
-                    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); /* Subtle shadow for depth */
-                    font-size: 13px; /* Standard font size */
-                    text-align: center;
-                }
-            """
         ) as blocks:
-            # avatar_byte = AVATAR_BOT.read_bytes()
-            # f_base64 = f"data:image/png;base64,{base64.b64encode(avatar_byte).decode('utf-8')}"
 
-            # Read the SVG file and encode it to base64
             with open("static/KKL_Logo.svg", "rb") as svg_file:
                 svg_byte = svg_file.read()
                 f_base64 = f"data:image/svg+xml;base64,{base64.b64encode(svg_byte).decode('utf-8')}"
@@ -704,7 +605,7 @@ class PrivateGptUi:
 
             with gr.Column(scale=3):
 
-                mode = gr.Radio(MODES, show_label=False, value="Update Column Names", interactive=True, elem_classes=["radio-buttons"])
+                mode = gr.Radio(MODES, show_label=False, value="Upload File", interactive=True, elem_classes=["radio-buttons"])
                 explanation_mode = gr.Textbox(
                     placeholder="Preprocess CSV and Ingest into Database.",
                     show_label=False,
@@ -790,31 +691,84 @@ class PrivateGptUi:
                                 confirm_button = gr.Button("Confirm", elem_classes=["confirm-btn"])
                                 cancel_button = gr.Button("Cancel", elem_classes=["cancel-btn"])
                         file_input = gr.File(label="Upload CSV/Excel File")
+
+                        sheet_choices = []
+
+                        sheet_dropdown = gr.Dropdown(
+                            choices=sheet_choices,
+                            value=sheet_choices,
+                            label="Muliple sheets present choose one",
+                            interactive=True,
+                            visible= False
+                        )
+
+
+
+
+                        def update_sheet(selected_sheet):
+                            self.selected_sheet = selected_sheet
+
+                        sheet_dropdown.change(
+                            update_sheet,
+                            inputs=[sheet_dropdown],
+                            outputs=[],
+                        )
+
+
+
                         file_name_textbox = gr.Textbox(value="No file uploaded", label="Table Name", interactive=True,
                                                        visible=False)
-                    table_description = gr.Textbox(value="", placeholder="Enter a description for the table or Click on Generate description to generate using GenAI.", interactive=True,
-                                                   visible=False,show_label=False)
-                    with gr.Row():
-                        save_button = gr.Button("Save Updated Columns", visible=False, elem_classes=["save-btn"])
-                        generate_description= gr.Button("Generate Description ", visible=False, elem_classes=["save-btn"])
+                    # with gr.Row(elem_classes=["horizontal-layout"]):
+                    #
+                    #     table_description = gr.Textbox(value="", placeholder="Enter a description for the table or Click on Generate description to generate using GenAI.", interactive=True,
+                    #                                visible=False, label="Table Description")
+                    #     generate_description= gr.Button("Generate Description ", visible=False, elem_classes=["horizontal2-btn"])
+                    with gr.Row(elem_classes=["horizontal-layout"]):
+                        table_description = gr.Textbox(
+                            value="",
+                            placeholder="Enter a description for the table or Click on Generate description to generate using GenAI.",
+                            interactive=True,
+                            visible=False,
+                            label="Table Description",
+                            elem_classes=["textbox-80"]
+                        )
+                    with gr.Row(elem_classes=["horizontal-layout-center"]):  # Center align button
+                        generate_description = gr.Button(
+                            "Generate Description",
+                            visible=False,
+                            elem_classes=["button-20"]
+                        )
 
+                    with gr.Row():
+                        sheet_button = gr.Button("Confirm", visible=False, elem_classes=["save-btn"])
+                    # with gr.Row():
+                        # save_button = gr.Button("Save Updated Columns", visible=False, elem_classes=["horizontal2-btn"])
+                        # generate_description= gr.Button("Generate Description ", visible=False, elem_classes=["horizontal2-btn"])
+                    # df_label = gr.Textbox(
+                    #     placeholder="Update Columns of Uploaded dataframe",
+                    #     show_label=False,
+                    #     max_lines=3,
+                    #     interactive=False,
+                    #     visible=False
+                    # )
 
                     df_output = gr.Dataframe(type="pandas",
-                                             interactive=True, column_widths=[200, 200, 300], visible=False)
+                                             interactive=True, column_widths=[200, 200, 300], visible=False,elem_classes=["hide-new-buttons"])
 
-                file_input.upload(process_file, inputs=file_input,
-                                  outputs=[file_name_textbox, df_output, save_button, ingest_button,table_description,generate_description])
+                    save_button = gr.Button("Save Updated Columns", visible=False, elem_classes=["horizontal2-btn"])
+
+                file_input.upload(process_file, inputs=[file_input, sheet_dropdown],
+                                  outputs=[file_name_textbox, df_output, save_button, ingest_button,table_description,generate_description, sheet_dropdown, sheet_button])
 
                 save_button.click(self._save_column_updates, inputs=df_output, outputs=ingest_message)
 
-
                 generate_description.click(generate_table_description, inputs=df_output, outputs=table_description)
-
 
                 file_input.upload(self._on_file_uploaded, inputs=file_input, outputs=[mode])
 
-
-
+                sheet_button.click(process_file, inputs=[file_input, sheet_dropdown],
+                                   outputs=[file_name_textbox, df_output, save_button, ingest_button, table_description,
+                                            generate_description, sheet_dropdown, sheet_button])
 
                 confirm_button.click(handle_confirm, inputs=[file_name_textbox,table_description],
                                      outputs=[confirmation_dialog, ingest_message])
@@ -827,22 +781,18 @@ class PrivateGptUi:
                 )
 
                 with gr.Column(visible=False) as database_mode:
-                    # List all tables in a dropdown or radio button
                     table_selector = gr.Radio(
-                        choices=get_database_tables(),  # Populate with current tables
+                        choices=get_database_tables(),
                         label="Select a Table",
                         interactive=True,
                     )
+                    with gr.Row():
+                        view_button = gr.Button(value="View Columns", elem_classes=["db-confirm-btn"])
+                        delete_button = gr.Button(value="Delete Table", elem_classes=["db-cancel-btn"])
 
-                    # Buttons to act on the selected table
-                    view_button = gr.Button(value="View Columns", elem_classes=["db-confirm-btn"])
-                    delete_button = gr.Button(value="Delete Table", elem_classes=["db-cancel-btn"])
-
-                    # Status and output
                     status_message = gr.Textbox(label="Status", interactive=False, visible=True)
                     tables_output = gr.Dataframe(label="Table Details", interactive=False, visible=False)
 
-                    # Button to close the table details view
                     close_button = gr.Button(value="Close", elem_classes=["close-btn"], visible=False)
 
                     def handle_view_columns(selected_table):
@@ -855,10 +805,8 @@ class PrivateGptUi:
                         if not selected_table:
                             return gr.update(value="Please select a table first.", visible=True)
 
-                        # Perform the delete action
                         status = delete_table(selected_table)
 
-                        # Refresh the table selector
                         updated_tables = get_database_tables()
                         return gr.update(choices=updated_tables), gr.update(value=status)
 
@@ -881,7 +829,6 @@ class PrivateGptUi:
                     tables1 = get_database_tables()
                     default_table = tables1[0] if tables1 else "No Tables Available"
 
-                    # Dropdown for selecting a database table
                     table_dropdown = gr.Dropdown(
                         choices=tables1,
                         value=default_table,
@@ -889,12 +836,9 @@ class PrivateGptUi:
                         interactive=True,
                     )
 
-                    # Function to handle table changes and update selected table in _chat
                     def update_table(selected_table):
-                        # Update the selected table globally or pass it to _chat dynamically
-                        self._selected_table = selected_table  # Store it in the class instance for later access
+                        self._selected_table = selected_table
 
-                    # Trigger table update when dropdown changes
                     table_dropdown.change(
                         update_table,
                         inputs=[table_dropdown],
@@ -918,7 +862,6 @@ class PrivateGptUi:
                 mode.change(self._set_current_mode, inputs=mode,
                             outputs=[csv_mode, chat_mode, database_mode, explanation_mode, ingest_message, ingest_button, table_dropdown, table_selector])
 
-
         return blocks
 
     def _on_file_uploaded(self, file: gr.File) -> gr.update:
@@ -927,11 +870,6 @@ class PrivateGptUi:
 
     def get_ui_blocks(self) -> gr.Blocks:
         return self._build_ui_blocks()
-
-    # def mount_in_app(self, app: FastAPI, path: str) -> None:
-    #     blocks = self.get_ui_blocks()
-    #     blocks.queue()
-    #     gr.mount_gradio_app(app, blocks, path=path, favicon_path=AVATAR_BOT)
 
 
 if __name__ == "__main__":
